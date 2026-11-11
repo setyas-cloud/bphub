@@ -315,8 +315,6 @@ select{
     transition:border-color .15s ease, color .15s ease;
 }
 .btn-mini:hover{border-color:var(--cyan); color:var(--cyan);}
-.btn-mini.chain{border-color:rgba(255,179,64,.6); color:var(--amber);}
-.btn-mini.chain:hover{border-color:var(--amber); color:var(--amber);}
 .result-foot{margin-top:4px;}
 .empty-note{font-size:.66rem; color:var(--muted); line-height:1.6;}
 
@@ -365,7 +363,6 @@ select{
                 <div class="rowline"><span class="k">ADAPTER AKTIF</span><span class="v">6 UNIT</span></div>
                 <div class="rowline"><span class="k">ARSITEKTUR</span><span class="v">FLASK + SSE</span></div>
                 <div class="rowline"><span class="k">MODE BATCH</span><span class="v">ANTRE SEKUENSIAL</span></div>
-                <div class="rowline"><span class="k">RANTAI KELUAR</span><span class="v">TBDL 5031 · ICY 5038</span></div>
                 <div class="rowline"><span class="k">REVISI PAKET</span><span class="v">1.01</span></div>
             </div>
         </div>
@@ -469,9 +466,6 @@ select{
         <div id="resultList"></div>
         <div class="result-foot">
             <button class="btn primary" id="btnCopyAll" style="width:100%;" onclick="copyAllResults()">SALIN SEMUA HASIL</button>
-            <p class="helper" style="margin-top:8px;">
-                <span>Hasil berdomain TeraBox / IceyFile mendapat tombol OPER — tautan diteruskan otomatis ke modul downloader-nya.</span>
-            </p>
         </div>
     </section>
 
@@ -622,36 +616,6 @@ select{
         $("targetUrl").value = ""; updateCounter(); $("targetUrl").focus();
     }
 
-    /* ================= rantai keluar ke modul downloader ================= */
-    function detectChain(url){
-        const u = (url||"").toLowerCase();
-        if(/terabox|1024terabox|mirrobox|nephobox|gibibox|tibibox|freemb|momery/.test(u)) return {name:"TBDL", port:5031};
-        if(/iceyfile/.test(u)) return {name:"ICY", port:5038};
-        return null;
-    }
-    async function operKe(url, port, name){
-        let queued = false;
-        try{
-            const res = await fetch(`http://127.0.0.1:${port}/chain`, {
-                method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({url})
-            });
-            const data = await res.json().catch(()=>({}));
-            queued = !!(res.ok && data.ok);
-        }catch(e){ queued = false; }
-        if(queued){
-            alert(`Operan terkirim ke modul ${name}! Membuka halamannya - link akan diproses OTOMATIS di sana.`);
-            window.open(`http://127.0.0.1:${port}/`, "_blank");
-        }else{
-            const go = () => window.open(`http://127.0.0.1:${port}/`, "_blank");
-            if(navigator.clipboard && navigator.clipboard.writeText){
-                navigator.clipboard.writeText(url).then(()=>{
-                    alert(`Modul ${name} belum merespons jembatan (mungkin belum jalan). Tautan disalin - tempel manual di modul ${name}.`);
-                    go();
-                }).catch(()=>{ go(); });
-            }else{ go(); }
-        }
-    }
-
     /* ================= inti: jalankan satu tautan lewat SSE ================= */
     function runOne(urlInput, forced){
         return new Promise((resolve)=>{
@@ -724,13 +688,6 @@ select{
                 const bOpen = document.createElement("button"); bOpen.className="btn-mini"; bOpen.textContent="BUKA";
                 bOpen.onclick = ()=>window.open(r.out, "_blank");
                 acts.appendChild(bOpen);
-                const chain = detectChain(r.out);
-                if(chain){
-                    const bChain = document.createElement("button"); bChain.className="btn-mini chain";
-                    bChain.textContent = `OPER KE ${chain.name}`;
-                    bChain.onclick = ()=>operKe(r.out, chain.port, chain.name);
-                    acts.appendChild(bChain);
-                }
                 item.appendChild(acts);
             }else{
                 const f = document.createElement("div"); f.className="batch-fail"; f.textContent = "GAGAL: " + (r.err || "-");
