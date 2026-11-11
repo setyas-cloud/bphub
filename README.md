@@ -11,7 +11,7 @@
 | cuty | Cuty.io | cuty.io / cutty.io | Browser (Chromium) |
 | shrme | ShrinkMe | shrinkme.click / shrinkme.io | Browser (Chromium) |
 | srnky | ShrinkEarn | shrinkearn.com | Browser (Chromium) |
-| clk | clk.sh | clk.sh / clk.asia murni | Browser (Chromium) |
+| clk | clk.sh | clk.sh / clksz.com | Browser (Chromium) |
 | ez4 | Ez4short | ez4short.com | HTTP murni |
 | dplink | DropLink | droplink.co | HTTP murni |
 
