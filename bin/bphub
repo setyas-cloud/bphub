@@ -1,0 +1,64 @@
+#!/data/data/com.termux/files/usr/bin/bash
+
+PROJECT="$HOME/storage/shared/Termux/Projek/bphub"
+URL="http://127.0.0.1:5049"
+LOG="$PROJECT/logs/bphub_server.log"
+
+if [ ! -f "$PROJECT/app.py" ]; then
+    echo "[BPHUB] app.py tidak ditemukan di $PROJECT"
+    exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "[BPHUB] curl belum tersedia."
+    exit 1
+fi
+
+mkdir -p "$PROJECT/logs"
+cd "$PROJECT" || exit 1
+
+READY=0
+
+if curl -fsS --max-time 2 "$URL/api/health" >/dev/null 2>&1; then
+    READY=1
+    echo "[BPHUB] Server yang ada akan digunakan kembali."
+else
+    echo "[BPHUB] Menjalankan server lokal..."
+    nohup python "$PROJECT/app.py" >> "$LOG" 2>&1 &
+    SERVER_PID=$!
+
+    for _ in $(seq 1 30); do
+        if curl -fsS --max-time 1 "$URL/api/health" >/dev/null 2>&1; then
+            READY=1
+            break
+        fi
+
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            break
+        fi
+
+        sleep 0.5
+    done
+fi
+
+if [ "$READY" -ne 1 ]; then
+    echo "[BPHUB] Server gagal siap."
+    echo "[BPHUB] Log: $LOG"
+    tail -40 "$LOG"
+    exit 1
+fi
+
+echo
+echo "========================================"
+echo "        BPHUB - BYPASS HUB"
+echo "========================================"
+echo "Status : ONLINE"
+echo "Host   : 127.0.0.1"
+echo "Port   : 5049"
+echo "Web    : $URL"
+echo "Log    : $LOG"
+echo "========================================"
+echo "[BPHUB] Membuka browser..."
+
+termux-open-url "$URL"
+echo "[BPHUB] Permintaan pembukaan browser dikirim."

@@ -1,0 +1,18 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Mematikan server BPHUB (port 5049) — pindai /proc langsung.
+# (fuser/ss tidak dapat diandalkan di perangkat ini: permission denied.)
+PAT="Projek/bphub/app.py"
+killed=0
+for proc in /proc/[0-9]*; do
+  pid=${proc##*/}
+  cmd=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null) || continue
+  case "$cmd" in
+    *"$PAT"*) kill -9 "$pid" 2>/dev/null && killed=$((killed+1)) ;;
+  esac
+done
+sleep 0.5
+if curl -fsS --max-time 2 "http://127.0.0.1:5049/api/health" >/dev/null 2>&1; then
+    echo "[BPHUB] Server masih merespons - coba lagi sebentar."
+    exit 1
+fi
+echo "[BPHUB] Server berhenti. ($killed proses dimatikan)"
