@@ -1,8 +1,8 @@
 # BPHUB — Bypass Hub
 
-**Satu pintu untuk enam layanan bypass shortlink.** BPHUB menggabungkan enam modul bypass yang tadinya berdiri sendiri-sendiri di Termux Command Center menjadi satu hub web lokal: tempel tautan, layanan terdeteksi otomatis dari domainnya, antrean campuran banyak tautan sekaligus, dan hasil bisa dioper ke modul downloader.
+**Satu pintu untuk enam layanan bypass shortlink.** BPHUB menggabungkan enam modul bypass yang tadinya berdiri sendiri-sendiri di Termux Command Center menjadi satu hub web lokal: tempel tautan, layanan terdeteksi otomatis dari domainnya, antrean campuran banyak tautan sekaligus, dan hasil akhirnya tinggal disalin atau dibuka.
 
-*One local web hub for six shortlink bypass services — paste links, the service is auto-detected from the domain, mixed batches run in one queue, and results can be chained to downloader modules.*
+*One local web hub for six shortlink bypass services — paste links, the service is auto-detected from the domain, mixed batches run in one queue, and each result is ready to copy or open.*
 
 ## Layanan / Services
 
@@ -20,7 +20,7 @@
 - Deteksi layanan otomatis dari domain + paksa layanan manual per kartu adapter / *auto-detect with manual override per adapter card*
 - Antrean batch campuran (banyak tautan, beda layanan, satu kali jalan) / *mixed batch queue*
 - Telemetri langsung per tautan (SSE): status, log, durasi, bilah kemajuan / *live per-link telemetry*
-- Hasil per tautan: salin, buka, atau oper ke downloader (rantai TBDL/ICY di Termux) / *copy, open, or chain the result*
+- Hasil per tautan: salin atau buka langsung dari panel hasil / *copy or open each result right from the results panel*
 - Panel kesehatan per adapter — hub tetap hidup walau satu mesin belum siap / *per-adapter health panel*
 - Tanpa akun, tanpa kunci API / *no accounts, no API keys*
 
