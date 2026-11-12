@@ -1,0 +1,16 @@
+{
+  "name": "bphub",
+  "postCreateCommand": "pip install -r requirements.txt && playwright install chromium",
+  "forwardPorts": [5049],
+  "portsAttributes": {
+    "5049": {
+      "label": "Panel BPHUB",
+      "onAutoForward": "notify"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}
