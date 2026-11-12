@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import threading
@@ -22,15 +23,26 @@ FINAL_HOST = "kenhlink.vip"
 FINAL_PATH_RE = re.compile(r"^/notes/([A-Za-z0-9_-]+)/?$")
 
 
-def emit_log(emit, msg, level="info", phase=""):
+def emit_log(emit, msg, level="info", phase="", detail=False):
     stamp = time.strftime("%H:%M:%S")
     event = {"type": "log", "ts": stamp, "msg": str(msg),
              "level": level, "phase": phase}
+    if detail:
+        event["detail"] = True
     try:
         print(f"[{stamp}] [SHRME/{level.upper()}]" + (f" [{phase}]" if phase else "") + f" {msg}", flush=True)
     except Exception:
         pass
     emit(event)
+
+
+def emit_detail(emit, msg, level="info", phase=""):
+    """Baris detail internal: hanya tampil di UI bila mode debug aktif.
+
+    Di mode default, hub (app.py) menahan event ini dari SSE; baris tetap
+    tercatat di stdout/log server lokal untuk keperluan debug.
+    """
+    emit_log(emit, msg, level, phase, detail=True)
 
 
 def emit_status(emit, state, label, stage=None):
@@ -40,10 +52,15 @@ def emit_status(emit, state, label, stage=None):
     emit(event)
 
 
-def emit_error(emit, msg, code="RESOLVE_ERROR", phase=""):
+def emit_error(emit, msg, code="RESOLVE_ERROR", phase="", url=""):
     emit_status(emit, "ERROR", "Terjadi kesalahan")
     emit_log(emit, f"{code}: {msg}", "error", phase)
-    emit({"type": "error", "msg": str(msg), "code": code, "phase": phase})
+    event = {"type": "error", "msg": str(msg), "code": code, "phase": phase}
+    if url:
+        # URL tujuan sempat tertangkap sebelum gagal: sertakan agar kartu
+        # hasil tetap menampilkannya (dengan SALIN/BUKA).
+        event["url"] = url
+    emit(event)
 
 
 def valid_target(value: str) -> str:
@@ -68,6 +85,38 @@ def is_final_note_url(url: str) -> bool:
                 and FINAL_PATH_RE.fullmatch(parsed.path or "") is not None)
     except Exception:
         return False
+
+
+def is_destination_url(url: str) -> bool:
+    """URL tujuan akhir apa pun host-nya: cukup http(s) + hostname.
+
+    Field `url` dari JSON /links/go sudah merupakan tautan tujuan akhir
+    (file host mana pun) — tanpa asumsi host tertentu.
+    """
+    try:
+        parsed = urlparse(url or "")
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    except Exception:
+        return False
+
+
+def accept_captured_url(candidate: str) -> str:
+    """Terima URL yang tertangkap dari /links/go sebagai hasil akhir.
+
+    Kembalikan URL tujuan akhir, atau "" bila tidak ada yang bisa dipakai.
+    Note kenhlink dinormalisasi seperti sebelumnya; URL lain (host apa pun)
+    dipakai apa adanya.
+    """
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return ""
+    if is_final_note_url(candidate):
+        parsed_candidate = urlparse(candidate)
+        note_match = FINAL_PATH_RE.fullmatch(parsed_candidate.path or "")
+        return f"https://{FINAL_HOST}/notes/{note_match.group(1)}"
+    if is_destination_url(candidate):
+        return candidate
+    return ""
 
 
 def inspect_page(page):
@@ -128,19 +177,19 @@ def countdown(emit, stage: int, label: str, seconds: int, total_seconds: int = 4
               stage_base: int = 0):
     seconds = max(0, int(seconds))
     emit_status(emit, "RUNNING", label, stage)
-    emit_log(emit, f"Timer dimulai: {label}, durasi {seconds} detik.", "info", label)
+    emit_detail(emit, f"Timer dimulai: {label}, durasi {seconds} detik.", "info", label)
     for remaining in range(seconds, 0, -1):
         elapsed_here = seconds - remaining
         pct = min(99, int(((stage_base + elapsed_here) / max(1, total_seconds)) * 100))
         emit({"type": "progress", "stage": stage, "label": label,
               "remaining": remaining, "total": seconds, "percent": pct})
         if remaining in {10, 5, 3, 2, 1} or remaining == seconds:
-            emit_log(emit, f"{label}: {remaining} detik tersisa.", "info", label)
+            emit_detail(emit, f"{label}: {remaining} detik tersisa.", "info", label)
         time.sleep(1)
     emit({"type": "progress", "stage": stage, "label": label,
           "remaining": 0, "total": seconds,
           "percent": min(99, int(((stage_base + seconds) / max(1, total_seconds)) * 100))})
-    emit_log(emit, f"Timer selesai: {label}.", "success", label)
+    emit_detail(emit, f"Timer selesai: {label}.", "success", label)
 
 
 def click_normal_continue(page, initial=False) -> dict:
@@ -227,7 +276,7 @@ def wait_for_page_change(page, before_url, before_text, seconds=5):
 
 def run_browser_flow(target: str, emit) -> dict:
     emit_status(emit, "STARTING", "Memvalidasi tautan", 1)
-    emit_log(emit, "Memvalidasi format URL dan domain target.", "info", "VALIDATE")
+    emit_detail(emit, "Memvalidasi format URL dan domain target.", "info", "VALIDATE")
     target = valid_target(target)
     parsed_target = urlparse(target)
     emit_log(emit, f"Validasi URL berhasil: host={parsed_target.hostname}, path={parsed_target.path}.", "success", "VALIDATE")
@@ -235,7 +284,7 @@ def run_browser_flow(target: str, emit) -> dict:
     emit_log(emit, f"Memulai Chromium headless untuk {target}", "info", "BROWSER")
     final_capture = {"url": "", "intermediate": ""}
 
-    emit_log(emit, "Menginisialisasi sesi Chromium...", "info", "BROWSER")
+    emit_detail(emit, "Menginisialisasi sesi Chromium...", "info", "BROWSER")
     try:
         browser_context = Chromium(headless=True)
     except Exception as exc:
@@ -243,21 +292,21 @@ def run_browser_flow(target: str, emit) -> dict:
         raise RuntimeError(f"Chromium gagal dibuat ({type(exc).__name__}): {exc}") from exc
 
     try:
-        emit_log(emit, "Memanggil Chromium.launch() agar koneksi CDP siap.", "info", "BROWSER")
+        emit_detail(emit, "Memanggil Chromium.launch() agar koneksi CDP siap.", "info", "BROWSER")
         browser = browser_context.launch()
         if browser is None:
             browser = browser_context
-        emit_log(emit, "Chromium.launch() selesai; koneksi CDP disiapkan.", "success", "BROWSER")
-        emit_log(emit, "Membuka tab baru.", "info", "BROWSER")
+        emit_detail(emit, "Chromium.launch() selesai; koneksi CDP disiapkan.", "success", "BROWSER")
+        emit_detail(emit, "Membuka tab baru.", "info", "BROWSER")
         try:
             page = browser.new_page()
         except Exception as exc:
             emit_log(emit, f"Gagal membuat tab Chromium: {type(exc).__name__}: {exc}", "error", "NEW_PAGE")
             raise RuntimeError(f"Gagal membuat tab Chromium ({type(exc).__name__}): {exc}") from exc
         try:
-            emit_log(emit, f"Tab siap; URL awal={getattr(page, 'url', '(URL belum tersedia)')}.", "success", "NEW_PAGE")
+            emit_detail(emit, f"Tab siap; URL awal={getattr(page, 'url', '(URL belum tersedia)')}.", "success", "NEW_PAGE")
         except Exception:
-            emit_log(emit, "Tab baru dibuat; properti URL belum bisa dibaca.", "warn", "NEW_PAGE")
+            emit_detail(emit, "Tab baru dibuat; properti URL belum bisa dibaca.", "warn", "NEW_PAGE")
 
         cdp_responses = []
         cdp_finished = []
@@ -288,7 +337,7 @@ def run_browser_flow(target: str, emit) -> dict:
                             "url": response.url,
                             "status": response.status,
                         })
-                    emit_log(
+                    emit_detail(
                         emit,
                         f"CDP respons {host}{parsed.path} terdeteksi, HTTP={response.status}.",
                         "success",
@@ -317,7 +366,7 @@ def run_browser_flow(target: str, emit) -> dict:
                         if is_new:
                             cdp_diag_seen[diag_key] = 1
                     if is_new:
-                        emit_log(
+                        emit_detail(
                             emit,
                             "CDP endpoint internal: "
                             f"HTTP={response.status} host={host} path={(parsed.path or '/')[:80]}",
@@ -325,7 +374,7 @@ def run_browser_flow(target: str, emit) -> dict:
                             "NETWORK",
                         )
             except Exception as exc:
-                emit_log(
+                emit_detail(
                     emit,
                     f"CDP listener: {type(exc).__name__}: {exc}",
                     "warn",
@@ -334,7 +383,7 @@ def run_browser_flow(target: str, emit) -> dict:
 
         try:
             page.network.on_response(_cdp_response_listener)
-            emit_log(emit, "CDP_DIRECT_CAPTURE_V1 aktif sebelum navigasi.", "success", "NETWORK")
+            emit_detail(emit, "CDP_DIRECT_CAPTURE_V1 aktif sebelum navigasi.", "success", "NETWORK")
         except Exception as exc:
             emit_log(
                 emit,
@@ -349,11 +398,11 @@ def run_browser_flow(target: str, emit) -> dict:
         emit_log(emit, f"Memuat halaman target (timeout 30 detik): {target}", "info", "NAVIGATION")
         try:
             nav_response = page.goto(target, timeout=30)
-            emit_log(emit, f"Navigasi awal selesai; response={type(nav_response).__name__ if nav_response is not None else 'tidak tersedia'}; URL aktif={getattr(page, 'url', '(kosong)')}.", "success", "NAVIGATION")
+            emit_detail(emit, f"Navigasi awal selesai; response={type(nav_response).__name__ if nav_response is not None else 'tidak tersedia'}; URL aktif={getattr(page, 'url', '(kosong)')}.", "success", "NAVIGATION")
         except Exception as exc:
             emit_log(emit, f"Navigasi awal melempar {type(exc).__name__}: {exc}; akan memeriksa URL/DOM yang tersisa.", "warn", "NAVIGATION")
             try:
-                emit_log(emit, f"URL setelah exception navigasi: {live_page_url(page)}", "info", "NAVIGATION")
+                emit_detail(emit, f"URL setelah exception navigasi: {live_page_url(page)}", "info", "NAVIGATION")
             except Exception:
                 emit_log(emit, "URL halaman tidak bisa dibaca setelah exception navigasi.", "error", "NAVIGATION")
 
@@ -409,7 +458,7 @@ def run_browser_flow(target: str, emit) -> dict:
               return true;
             }"""
             page.evaluate(observer_script)
-            emit_log(emit, "Observer fetch/XHR kompatibel terpasang untuk endpoint Themezon /go/ dan ShrinkMe /links/go.", "success", "NETWORK")
+            emit_detail(emit, "Observer fetch/XHR kompatibel terpasang untuk endpoint Themezon /go/ dan ShrinkMe /links/go.", "success", "NETWORK")
         except Exception as exc:
             emit_log(emit, f"Observer fetch/XHR tidak dapat dipasang: {type(exc).__name__}: {exc}; lanjut dengan URL/DOM saja.", "warn", "NETWORK")
 
@@ -456,7 +505,7 @@ def run_browser_flow(target: str, emit) -> dict:
                 except Exception as exc:
                     attempt = item.get("_body_attempts", 0)
                     if attempt in (1, 4, 8, 15):
-                        emit_log(
+                        emit_detail(
                             emit,
                             f"Body respons belum tersedia (percobaan {attempt}): {type(exc).__name__}: {exc}",
                             "info",
@@ -480,20 +529,22 @@ def run_browser_flow(target: str, emit) -> dict:
                     data = json.loads(body or "{}")
                     candidate = data.get("url", "") if isinstance(data, dict) else ""
 
-                    if candidate and is_final_note_url(candidate):
+                    accepted = accept_captured_url(candidate) if candidate else ""
+                    if accepted:
                         final_capture["url"] = candidate
+                        final_capture["intermediate"] = accepted
                         emit_log(
                             emit,
-                            "URL tujuan berhasil diambil dari JSON respons ThemeZon dan lolos validasi.",
+                            "URL tujuan berhasil diambil dari JSON respons dan lolos validasi.",
                             "success",
                             "CAPTURE",
                         )
-                        return candidate
+                        return accepted
 
                     if candidate:
-                        emit_log(
+                        emit_detail(
                             emit,
-                            "JSON berisi URL, tetapi host/path tidak cocok dengan aturan tujuan.",
+                            "JSON berisi nilai url yang bukan URL tujuan yang valid.",
                             "warn",
                             "CAPTURE",
                         )
@@ -503,14 +554,14 @@ def run_browser_flow(target: str, emit) -> dict:
                             if isinstance(data, dict)
                             else f"JSON type={type(data).__name__}; "
                         )
-                        emit_log(
+                        emit_detail(
                             emit,
                             f"Diagnostik body HTTP 200: {shape}body awal={body[:700]!r}",
                             "info",
                             "CAPTURE",
                         )
                 except Exception as exc:
-                    emit_log(
+                    emit_detail(
                         emit,
                         f"Body respons tidak dapat diproses sebagai JSON: {type(exc).__name__}: {exc}",
                         "warn",
@@ -548,14 +599,14 @@ def run_browser_flow(target: str, emit) -> dict:
                     candidate = data.get("url", "") if isinstance(data, dict) else ""
                     if candidate:
                         final_capture["intermediate"] = candidate
-                        emit_log(
+                        emit_detail(
                             emit,
                             "Field url diterima dari respons JSON /links/go.",
                             "success",
                             "CAPTURE",
                         )
                 except Exception as exc:
-                    emit_log(
+                    emit_detail(
                         emit,
                         f"Body /links/go belum dapat dibaca: {type(exc).__name__}: {exc}",
                         "warn",
@@ -581,6 +632,13 @@ def run_browser_flow(target: str, emit) -> dict:
                     normalized = f"https://{FINAL_HOST}/notes/{slug}"
                     emit_log(emit, "Respons akhir berisi slug note; menampilkan URL tujuan note tanpa membaca isinya.", "success")
                     return {"status": "success", "url": normalized}
+                accepted = accept_captured_url(candidate)
+                if accepted:
+                    # Field url dari JSON /links/go sudah merupakan tautan
+                    # tujuan akhir (host apa pun) — langsung sukses,
+                    # jangan menunggu URL note lagi.
+                    emit_log(emit, "URL tujuan diterima; menampilkan hasil akhir.", "success")
+                    return {"status": "success", "url": accepted}
 
             try:
                 net_events = page.evaluate("() => { const e = window.__shrmeNetEvents || []; const n = window.__shrmeNetLast || 0; window.__shrmeNetLast = e.length; return e.slice(n); }")
@@ -589,12 +647,12 @@ def run_browser_flow(target: str, emit) -> dict:
                         u = urlparse(event.get("url", ""))
                         h = (u.hostname or "").lower()
                         path = u.path.rstrip("/")
-                        emit_log(emit, f"Respons halaman terpantau: {h}{u.path}; HTTP={event.get('status')}", "success" if int(event.get("status") or 0) < 400 else "warn", "NETWORK")
+                        emit_detail(emit, f"Respons halaman terpantau: {h}{u.path}; HTTP={event.get('status')}", "success" if int(event.get("status") or 0) < 400 else "warn", "NETWORK")
                         if h == "themezon.net" and path == "/go":
                             try:
                                 data = json.loads(event.get("body") or "{}")
                                 remaining = data.get("data", {}).get("remaining") if isinstance(data, dict) else None
-                                emit_log(emit, f"Themezon /go/ JSON: remaining={remaining if remaining is not None else 'tidak ada'}.", "info", "THEMEZON_NETWORK")
+                                emit_detail(emit, f"Themezon /go/ JSON: remaining={remaining if remaining is not None else 'tidak ada'}.", "info", "THEMEZON_NETWORK")
                             except Exception:
                                 pass
                         if h == "shrinkme.click" and path == "/links/go":
@@ -603,14 +661,14 @@ def run_browser_flow(target: str, emit) -> dict:
                                 iter_candidate = data.get("url", "") if isinstance(data, dict) else ""
                                 if iter_candidate:
                                     final_capture["intermediate"] = iter_candidate
-                                    emit_log(emit, f"URL tujuan diterima dari JSON /links/go: {iter_candidate}", "success", "CAPTURE")
+                                    emit_log(emit, f"URL tujuan diterima: {iter_candidate}", "success", "CAPTURE")
                             except Exception as exc:
-                                emit_log(emit, f"JSON /links/go gagal dibaca: {type(exc).__name__}: {exc}", "warn", "CAPTURE")
+                                emit_detail(emit, f"JSON /links/go gagal dibaca: {type(exc).__name__}: {exc}", "warn", "CAPTURE")
                     except Exception:
                         pass
             except Exception as exc:
                 if not hasattr(run_browser_flow, "_net_warned"):
-                    emit_log(emit, f"Pembacaan observer jaringan gagal: {type(exc).__name__}: {exc}", "warn", "NETWORK")
+                    emit_detail(emit, f"Pembacaan observer jaringan gagal: {type(exc).__name__}: {exc}", "warn", "NETWORK")
                     run_browser_flow._net_warned = True
             try:
                 state = inspect_page(page)
@@ -618,7 +676,7 @@ def run_browser_flow(target: str, emit) -> dict:
             except Exception as exc:
                 inspect_errors += 1
                 if inspect_errors in {1, 3, 5}:
-                    emit_log(emit, f"DOM inspection gagal ({inspect_errors}x): {type(exc).__name__}: {exc}", "warn", "DOM_INSPECT")
+                    emit_detail(emit, f"DOM inspection gagal ({inspect_errors}x): {type(exc).__name__}: {exc}", "warn", "DOM_INSPECT")
                 time.sleep(1)
                 continue
 
@@ -629,30 +687,30 @@ def run_browser_flow(target: str, emit) -> dict:
                     try:
                         observer_ready = page.evaluate(observer_script)
                         if host == "themezon.net":
-                            emit_log(
+                            emit_detail(
                                 emit,
                                 f"Observer ThemeZon dipasang ulang; aktif={bool(observer_ready)}.",
                                 "success" if observer_ready else "warn",
                                 "NETWORK",
                             )
                     except Exception as exc:
-                        emit_log(
+                        emit_detail(
                             emit,
                             f"Observer gagal dipasang ulang: {type(exc).__name__}: {exc}",
                             "warn",
                             "NETWORK",
                         )
                 emit_status(emit, "RUNNING", f"Halaman aktif: {host or current_url}", 1)
-                emit_log(emit, f"Perpindahan/halaman aktif terdeteksi: host={host or '(kosong)'}; URL={current_url or '(kosong)'}.", "info", "NAVIGATION")
+                emit_detail(emit, f"Perpindahan/halaman aktif terdeteksi: host={host or '(kosong)'}; URL={current_url or '(kosong)'}.", "info", "NAVIGATION")
                 last_host, last_url = host, current_url
                 controls = state.get("controls", [])[:8]
                 control_summary = ", ".join(
                     (f"{item.get('tag')}#{item.get('id') or '-'}:{item.get('text') or '(tanpa label)'}" + (" [disabled]" if item.get("disabled") else ""))
                     for item in controls
                 ) or "tidak ada kontrol terlihat"
-                emit_log(emit, f"Snapshot DOM: title={state.get('title') or '(kosong)'}; form={state.get('formId') or '(tidak ada)'}; kontrol={control_summary}.", "info", "DOM_SNAPSHOT")
+                emit_detail(emit, f"Snapshot DOM: title={state.get('title') or '(kosong)'}; form={state.get('formId') or '(tidak ada)'}; kontrol={control_summary}.", "info", "DOM_SNAPSHOT")
                 if host in {"shrinkme.click", "www.shrinkme.click"}:
-                    emit_log(emit, f"Konfigurasi halaman: captcha={state.get('captchaType') or '(tidak terdeteksi)'}; enabled={state.get('captchaEnabled') or '(tidak terdeteksi)'}; counter={state.get('counter')}; token_chars={state.get('tokenLength', 0)}; ad_form_data={state.get('hasAdFormData')}.", "info", "DOM_SNAPSHOT")
+                    emit_detail(emit, f"Konfigurasi halaman: captcha={state.get('captchaType') or '(tidak terdeteksi)'}; enabled={state.get('captchaEnabled') or '(tidak terdeteksi)'}; counter={state.get('counter')}; token_chars={state.get('tokenLength', 0)}; ad_form_data={state.get('hasAdFormData')}.", "info", "DOM_SNAPSHOT")
 
             if host in {"shrinkme.click", "www.shrinkme.click"} and state.get("formId") == "link-view" and not initial_clicked:
                 emit_status(emit, "WAITING CAPTCHA" if not turnstile_seen else "RUNNING", "Gerbang awal ShrinkMe", 1)
@@ -687,19 +745,22 @@ def run_browser_flow(target: str, emit) -> dict:
                 wait_sec = min(30, max(0, wait_sec))
                 emit_log(emit, f"Timer awal ShrinkMe: {wait_sec} detik.")
                 countdown(emit, 1, "Gerbang awal ShrinkMe", wait_sec, 40, 0)
-                emit_log(emit, "Mencari tombol #invisibleCaptchaShortlink yang terlihat dan aktif.", "info", "INITIAL_CONTINUE")
+                emit_detail(emit, "Mencari tombol #invisibleCaptchaShortlink yang terlihat dan aktif.", "info", "INITIAL_CONTINUE")
                 click_result = click_normal_continue(page, initial=True)
                 if not click_result.get("clicked"):
-                    emit_log(emit, f"Evaluasi klik awal tidak terkonfirmasi: {click_result.get('reason', 'alasan tidak tersedia')}; detail={json.dumps(click_result, ensure_ascii=False)[:900]}", "warn", "INITIAL_CONTINUE")
+                    emit_log(emit, f"Evaluasi klik awal tidak terkonfirmasi: {click_result.get('reason', 'alasan tidak tersedia')}", "warn", "INITIAL_CONTINUE")
+                    emit_detail(emit, f"Detail klik awal: {json.dumps(click_result, ensure_ascii=False)[:900]}", "info", "INITIAL_CONTINUE")
                     changed, change_reason = wait_for_page_change(page, current_url, state.get("text", ""), seconds=5)
                     if not changed:
                         emit_log(emit, f"Tombol awal tidak terkonfirmasi dan tidak ada transisi: {change_reason}", "error", "INITIAL_CONTINUE")
                         return {"status": "error", "message": f"Klik tombol awal tidak terkonfirmasi. Detail: {click_result.get('reason', 'tidak diketahui')}. Observasi: {change_reason}. Periksa kontrol dan error evaluate pada log."}
                     emit_log(emit, f"Evaluate tidak mengembalikan konfirmasi klik, tetapi transisi teramati: {change_reason}.", "success", "INITIAL_CONTINUE")
                 else:
-                    emit_log(emit, f"Klik normal terkirim: {json.dumps(click_result.get('details', {}), ensure_ascii=False)}", "success", "INITIAL_CONTINUE")
+                    _label = (click_result.get("details", {}) or {}).get("label") or "tombol lanjut"
+                    emit_log(emit, f"Klik terkirim: {_label}", "success", "INITIAL_CONTINUE")
+                    emit_detail(emit, f"Detail klik awal: {json.dumps(click_result.get('details', {}), ensure_ascii=False)}", "info", "INITIAL_CONTINUE")
                 initial_clicked = True
-                emit_log(emit, "Menunggu navigasi atau perubahan DOM setelah Continue awal.", "info", "INITIAL_CONTINUE")
+                emit_detail(emit, "Menunggu navigasi atau perubahan DOM setelah Continue awal.", "info", "INITIAL_CONTINUE")
                 time.sleep(2)
                 continue
 
@@ -724,12 +785,15 @@ def run_browser_flow(target: str, emit) -> dict:
 
                 click_result = click_normal_continue(page, initial=False)
                 if not click_result.get("clicked"):
-                    emit_log(emit, f"Klik Continue belum terkonfirmasi: {click_result.get('reason', 'alasan tidak tersedia')}; detail={json.dumps(click_result, ensure_ascii=False)[:900]}", "warn", f"THEMEZON_STEP_{step_no}")
+                    emit_log(emit, f"Klik Continue belum terkonfirmasi: {click_result.get('reason', 'alasan tidak tersedia')}", "warn", f"THEMEZON_STEP_{step_no}")
+                    emit_detail(emit, f"Detail klik ThemeZon: {json.dumps(click_result, ensure_ascii=False)[:900]}", "info", f"THEMEZON_STEP_{step_no}")
                 else:
-                    emit_log(emit, f"Klik Continue normal terkirim: {json.dumps(click_result.get('details', {}), ensure_ascii=False)}", "success", f"THEMEZON_STEP_{step_no}")
+                    _label = (click_result.get("details", {}) or {}).get("label") or "tombol lanjut"
+                    emit_log(emit, f"Klik terkirim: {_label}", "success", f"THEMEZON_STEP_{step_no}")
+                    emit_detail(emit, f"Detail klik ThemeZon: {json.dumps(click_result.get('details', {}), ensure_ascii=False)}", "info", f"THEMEZON_STEP_{step_no}")
 
                 themezon_steps += 1
-                emit_log(emit, f"Memeriksa navigasi atau tombol lanjut yang baru aktif (batas 12 detik).", "info", f"THEMEZON_STEP_{step_no}")
+                emit_detail(emit, f"Memeriksa navigasi atau tombol lanjut yang baru aktif (batas 12 detik).", "info", f"THEMEZON_STEP_{step_no}")
                 transition_seen = False
                 before_cta_set = set(before_cta)
                 for wait_sec_loop in range(1, 13):
@@ -754,14 +818,14 @@ def run_browser_flow(target: str, emit) -> dict:
                                         payload = json.loads(event.get("body") or "{}")
                                         remaining = payload.get("data", {}).get("remaining")
                                         if remaining is not None:
-                                            emit_log(emit, f"ThemeZon timer terdeteksi: {remaining} detik tersisa.", "info", "THEMEZON_NETWORK")
+                                            emit_detail(emit, f"ThemeZon timer terdeteksi: {remaining} detik tersisa.", "info", "THEMEZON_NETWORK")
                                     except Exception:
                                         pass
                             except Exception:
                                 pass
                     except Exception as exc:
                         if wait_sec_loop in {1, 6, 12}:
-                            emit_log(emit, f"Pemeriksaan transisi ke-{wait_sec_loop}s gagal: {type(exc).__name__}: {exc}", "warn", "TRANSITION")
+                            emit_detail(emit, f"Pemeriksaan transisi ke-{wait_sec_loop}s gagal: {type(exc).__name__}: {exc}", "warn", "TRANSITION")
                         continue
 
                     if now_url != click_before_url:
@@ -777,7 +841,7 @@ def run_browser_flow(target: str, emit) -> dict:
                         break
 
                     if wait_sec_loop in {3, 6, 9, 12}:
-                        emit_log(emit, f"Menunggu navigasi/tombol aktif: {wait_sec_loop}/12 detik.", "warn" if wait_sec_loop == 12 else "info", "TRANSITION")
+                        emit_detail(emit, f"Menunggu navigasi/tombol aktif: {wait_sec_loop}/12 detik.", "warn" if wait_sec_loop == 12 else "info", "TRANSITION")
 
                 if not transition_seen:
                     click_reason = click_result.get("reason", "klik normal terkonfirmasi")
@@ -790,20 +854,23 @@ def run_browser_flow(target: str, emit) -> dict:
                 emit_status(emit, "EXTRACTING URL", "Form final ShrinkMe terdeteksi", 5)
                 wait_sec = int(state.get("counter", 10) or 10)
                 wait_sec = min(30, max(0, wait_sec))
-                emit_log(emit, f"Form final dan field ad_form_data terdeteksi; timer yang dibaca dari app_vars={wait_sec}s.", "success", "FINAL_FORM")
+                emit_log(emit, f"Form final terdeteksi; menunggu {wait_sec} detik.", "success", "FINAL_FORM")
                 countdown(emit, 5, "Mengambil URL tujuan", wait_sec, 40, 30)
                 click_result = click_normal_continue(page, initial=False)
                 if not click_result.get("clicked"):
-                    emit_log(emit, f"Klik tombol final belum terkonfirmasi: {click_result.get('reason', 'alasan tidak tersedia')}; detail={json.dumps(click_result, ensure_ascii=False)[:900]}", "warn", "FINAL_FORM")
+                    emit_log(emit, f"Klik tombol final belum terkonfirmasi: {click_result.get('reason', 'alasan tidak tersedia')}", "warn", "FINAL_FORM")
+                    emit_detail(emit, f"Detail klik final: {json.dumps(click_result, ensure_ascii=False)[:900]}", "info", "FINAL_FORM")
                     changed, change_reason = wait_for_page_change(page, current_url, state.get("text", ""), seconds=5)
                     if not changed:
                         emit_log(emit, f"Tidak ada transisi setelah percobaan submit final: {change_reason}", "error", "FINAL_FORM")
                         return {"status": "error", "message": f"Tombol final tidak terkonfirmasi. {click_result.get('reason', '')} {change_reason}"}
                     emit_log(emit, f"Transisi teramati meskipun evaluasi klik tidak terkonfirmasi: {change_reason}", "success", "FINAL_FORM")
                 else:
-                    emit_log(emit, f"Tombol final diklik secara normal: {json.dumps(click_result.get('details', {}), ensure_ascii=False)}", "success", "FINAL_FORM")
+                    _label = (click_result.get("details", {}) or {}).get("label") or "tombol lanjut"
+                    emit_log(emit, f"Tombol final diklik: {_label}", "success", "FINAL_FORM")
+                    emit_detail(emit, f"Detail klik final: {json.dumps(click_result.get('details', {}), ensure_ascii=False)}", "info", "FINAL_FORM")
                 final_submit_clicked = True
-                emit_log(emit, "Menunggu respons JSON /links/go dan URL halaman note; isi note tidak dibaca.", "info", "FINAL_FORM")
+                emit_log(emit, "Menunggu URL tujuan dari halaman final.", "info", "FINAL_FORM")
                 continue
 
             candidate = final_capture.get("intermediate", "")
@@ -815,6 +882,13 @@ def run_browser_flow(target: str, emit) -> dict:
                     normalized = f"https://{FINAL_HOST}/notes/{slug}"
                     emit_log(emit, "Respons akhir berisi slug note; menampilkan URL tujuan note tanpa membaca isinya.", "success")
                     return {"status": "success", "url": normalized}
+                accepted = accept_captured_url(candidate)
+                if accepted:
+                    # Field url dari JSON /links/go sudah merupakan tautan
+                    # tujuan akhir (host apa pun) — langsung sukses,
+                    # jangan menunggu URL note lagi.
+                    emit_log(emit, "URL tujuan diterima; menampilkan hasil akhir.", "success")
+                    return {"status": "success", "url": accepted}
 
             if host in {"", "about:blank"} or current_url in {"", "about:blank"}:
                 time.sleep(1)
@@ -822,12 +896,18 @@ def run_browser_flow(target: str, emit) -> dict:
             if host and host not in {"shrinkme.click", "www.shrinkme.click", "shrinkme.io", "www.shrinkme.io", "themezon.net", "en.mrproblogger.com"}:
                 emit_status(emit, "ERROR", f"Berhenti di host {host}")
                 emit_log(emit, f"Host yang tidak dikenal terdeteksi: {host}; URL={current_url}. Engine berhenti agar tidak mengambil isi/link dari halaman luar.", "error", "HOST_CHECK")
-                return {"status": "error", "message": f"Alur berpindah ke host {host} sebelum URL note terkonfirmasi. Periksa URL aktif di log; halaman luar tidak dipanen."}
+                return {"status": "error", "message": f"Alur berpindah ke host {host} sebelum URL tujuan terkonfirmasi. Periksa URL aktif di log; halaman luar tidak dipanen."}
 
             time.sleep(1)
 
-        emit_log(emit, "Batas waktu total 210 detik tercapai tanpa URL note yang terkonfirmasi.", "error", "TIMEOUT")
-        return {"status": "error", "message": "Timeout 210 detik: URL kenhlink.vip/notes/<slug> belum terdeteksi. Lihat log terakhir untuk mengetahui tahap macet."}
+        captured = final_capture.get("intermediate") or final_capture.get("url") or ""
+        emit_log(emit, "Batas waktu total 210 detik tercapai tanpa URL tujuan yang terkonfirmasi.", "error", "TIMEOUT")
+        error_result = {"status": "error", "message": "Timeout 210 detik: URL tujuan belum terkonfirmasi. Lihat log terakhir untuk mengetahui tahap macet."}
+        if captured:
+            # URL sempat tertangkap tapi alur kemudian gagal: sertakan agar
+            # kartu hasil tetap menampilkannya.
+            error_result["url"] = captured
+        return error_result
     finally:
         try:
             browser_context.close()
@@ -838,12 +918,12 @@ def run_browser_flow(target: str, emit) -> dict:
 def start_resolution(target: str, emit) -> None:
     phase = "START"
     emit_status(emit, "STARTING", "Memulai resolver", 1)
-    emit_log(emit, "Permintaan resolve diterima oleh Flask.", "info", phase)
+    emit_detail(emit, "Permintaan resolve diterima oleh Flask.", "info", phase)
     try:
         phase = "VALIDATE"
-        emit_log(emit, "Memeriksa URL input sebelum membuka browser.", "info", phase)
+        emit_detail(emit, "Memeriksa URL input sebelum membuka browser.", "info", phase)
         target = valid_target(target)
-        emit_log(emit, f"Input lolos validasi; target={target}", "success", phase)
+        emit_detail(emit, f"Input lolos validasi; target={target}", "success", phase)
         phase = "BROWSER_FLOW"
         result = run_browser_flow(target, emit)
         if result.get("status") == "success":
@@ -852,7 +932,7 @@ def start_resolution(target: str, emit) -> None:
             emit({"type": "result", "url": result["url"]})
         else:
             message = result.get("message", "Resolusi gagal tanpa pesan spesifik.")
-            emit_error(emit, message, "FLOW_ERROR", phase)
+            emit_error(emit, message, "FLOW_ERROR", phase, url=result.get("url") or "")
     except ValueError as exc:
         emit_error(emit, str(exc), "INPUT_VALIDATION", phase)
     except Exception as exc:
@@ -894,8 +974,23 @@ def resolve(target_url):
         if t == "result":
             yield {"type": "result", "url": event.get("url", "")}
         elif t == "error":
-            yield {"type": "error", "msg": event.get("msg", "Gagal tanpa pesan.")}
+            err = {"type": "error", "msg": event.get("msg", "Gagal tanpa pesan.")}
+            if event.get("url"):
+                err["url"] = event["url"]
+            yield err
+        elif t == "progress":
+            # Teruskan apa adanya: UI mengabaikan progress. Jangan ubah
+            # menjadi log kosong (dulu jatuh ke else dan membanjiri log
+            # dengan satu baris kosong tiap detik).
+            yield {"type": "progress", "stage": event.get("stage"),
+                   "label": event.get("label", ""), "remaining": event.get("remaining"),
+                   "total": event.get("total"), "percent": event.get("percent")}
         elif t == "status":
             yield {"type": "log", "msg": event.get("label", ""), "level": "info"}
         else:
-            yield {"type": "log", "msg": event.get("msg", ""), "level": event.get("level", "info")}
+            log_ev = {"type": "log", "msg": event.get("msg", ""),
+                      "level": event.get("level", "info")}
+            if event.get("detail"):
+                # Teruskan penanda detail agar hub bisa menahannya di mode default.
+                log_ev["detail"] = True
+            yield log_ev

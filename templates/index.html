@@ -274,6 +274,8 @@ select{
 }
 .live-tag .dot{width:7px; height:7px; border-radius:50%; background:var(--ok); box-shadow:0 0 7px var(--ok); animation:pulse 1.6s ease-in-out infinite;}
 .term-actions{margin-left:auto; display:flex; gap:7px; flex-wrap:wrap;}
+.debug-toggle{display:inline-flex; align-items:center; gap:6px; font-size:.58rem; letter-spacing:.14em; color:var(--muted); cursor:pointer; padding:4px 2px;}
+.debug-toggle input{accent-color:var(--amber);}
 .term-wrap{position:relative; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:#020a16;}
 .terminal{
     height:308px; overflow-y:auto; padding:12px 13px;
@@ -336,7 +338,7 @@ select{
 
     <div class="ruler"></div>
     <div class="topbar">
-        <span class="cell"><span class="sq"></span><b>TERMUX COMMAND CENTER</b></span>
+        <span class="cell"><span class="sq"></span><b>BPHUB</b></span>
         <span class="cell"><span class="sq c"></span>LEMBAR KENDALI // DWG-BPH-5049</span>
         <span class="cell"><span class="sq g"></span>SESI LOKAL — <span id="clockNow">--:--:--</span> WIB</span>
     </div>
@@ -441,6 +443,7 @@ select{
             <span class="sec-title">TELEMETRI PROSES</span>
             <span class="live-tag"><span class="dot"></span>SSE // LIVE</span>
             <div class="term-actions">
+                <label class="debug-toggle" title="Tampilkan baris log detail internal (CDP, DOM, endpoint)"><input type="checkbox" id="chkDebug"> LOG DETAIL</label>
                 <button class="btn ghost small" id="btnCopyLog" onclick="copyLogs()">SALIN LOG</button>
                 <button class="btn ghost small" onclick="clearLog()">BERSIHKAN LOG</button>
             </div>
@@ -470,7 +473,7 @@ select{
     </section>
 
     <div class="footer">
-        <b>BPHUB — BYPASS HUB</b> · TERMUX COMMAND CENTER · DOKUMEN DWG-BPH-5049 · REV 1.01<br>
+        <b>BPHUB — BYPASS HUB</b> · DOKUMEN DWG-BPH-5049 · REV 1.01<br>
         Pintasan: <span class="keys">Ctrl</span> + <span class="keys">Enter</span> menjalankan resolve dari kolom manifes ·
         Batch diproses antre — mesin browser tidak aman diparalelkan.
     </div>
@@ -622,7 +625,8 @@ select{
             let settled = false;
             const done = (v)=>{ if(!settled){ settled=true; resolve(v); } };
             let svcSeen = forced || "";
-            const qs = `/stream?url=${encodeURIComponent(urlInput)}` + (forced ? `&service=${encodeURIComponent(forced)}` : "");
+            const debug = $("chkDebug") && $("chkDebug").checked;
+            const qs = `/stream?url=${encodeURIComponent(urlInput)}` + (forced ? `&service=${encodeURIComponent(forced)}` : "") + (debug ? "&debug=1" : "");
             const evtSource = new EventSource(qs);
             evtSource.onmessage = function(e){
                 let data; try{ data = JSON.parse(e.data); }catch(_){ return; }
@@ -636,7 +640,7 @@ select{
                 }else if(data.type === "error"){
                     log("Gagal: " + data.msg, "error", svcSeen);
                     evtSource.close();
-                    done({ok:false, err:data.msg, svc:svcSeen});
+                    done({ok:false, err:data.msg, svc:svcSeen, out:(data.url || null)});
                 }
             };
             evtSource.onerror = function(){
@@ -648,6 +652,16 @@ select{
 
     /* ================= hasil panen ================= */
     let batchResults = [];
+    function resultActions(out){
+        const acts = document.createElement("div"); acts.className="batch-actions";
+        const bCopy = document.createElement("button"); bCopy.className="btn-mini"; bCopy.textContent="SALIN";
+        bCopy.onclick = ()=>{ navigator.clipboard && navigator.clipboard.writeText(out); flashBtn(bCopy, "TERSALIN"); };
+        acts.appendChild(bCopy);
+        const bOpen = document.createElement("button"); bOpen.className="btn-mini"; bOpen.textContent="BUKA";
+        bOpen.onclick = ()=>window.open(out, "_blank");
+        acts.appendChild(bOpen);
+        return acts;
+    }
     function flashBtn(btn, text){
         if(!btn) return;
         const old = btn.textContent;
@@ -681,17 +695,19 @@ select{
             if(r.ok){
                 const outEl = document.createElement("div"); outEl.className="batch-out"; outEl.textContent = r.out;
                 item.appendChild(outEl);
-                const acts = document.createElement("div"); acts.className="batch-actions";
-                const bCopy = document.createElement("button"); bCopy.className="btn-mini"; bCopy.textContent="SALIN";
-                bCopy.onclick = ()=>{ navigator.clipboard && navigator.clipboard.writeText(r.out); flashBtn(bCopy, "TERSALIN"); };
-                acts.appendChild(bCopy);
-                const bOpen = document.createElement("button"); bOpen.className="btn-mini"; bOpen.textContent="BUKA";
-                bOpen.onclick = ()=>window.open(r.out, "_blank");
-                acts.appendChild(bOpen);
-                item.appendChild(acts);
+                item.appendChild(resultActions(r.out));
             }else{
                 const f = document.createElement("div"); f.className="batch-fail"; f.textContent = "GAGAL: " + (r.err || "-");
                 item.appendChild(f);
+                if(r.out){
+                    // URL tujuan sempat tertangkap sebelum alur gagal:
+                    // tetap tampilkan dengan SALIN/BUKA.
+                    const note = document.createElement("div"); note.className="batch-src"; note.textContent = "URL sempat tertangkap sebelum gagal:";
+                    item.appendChild(note);
+                    const outEl = document.createElement("div"); outEl.className="batch-out"; outEl.textContent = r.out;
+                    item.appendChild(outEl);
+                    item.appendChild(resultActions(r.out));
+                }
             }
             list.appendChild(item);
         });
@@ -756,7 +772,7 @@ select{
         flashBtn($("btnCopyLog"), "LOG TERSALIN");
     }
     function copyAllResults(){
-        const txt = batchResults.filter(r=>r.ok).map(r=>r.out).join("\n");
+        const txt = batchResults.filter(r=>r.out).map(r=>r.out).join("\n");
         if(txt && navigator.clipboard) navigator.clipboard.writeText(txt);
         flashBtn($("btnCopyAll"), "SEMUA HASIL TERSALIN");
     }

@@ -13,6 +13,7 @@ domainnya -> adapter yang cocok memproses -> SSE event seragam:
 """
 import importlib
 import json
+import os
 import time
 from urllib.parse import urlparse
 
@@ -64,6 +65,30 @@ def sse(event):
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+# Pola baris log detail dari adapter lain yang belum menandai barisnya
+# sendiri (hitung mundur tiap detik cuty/srnky). Baris level error tidak
+# pernah disaring. Dicocokkan pada isi pesan (huruf kecil).
+_DETAIL_LOG_PATTERNS = (
+    "timer berjalan:",  # cuty: satu baris tiap detik selama timer sesi
+    "berjalan mundur",  # srnky: "Timer Pos N: berjalan mundur (Ns)..."
+    "cooldown",  # srnky: "Cooldown Pos N: Ns tersisa..." tiap detik
+    "s tersisa",  # srnky: "Ns tersisa..." tiap detik
+)
+
+
+def _is_detail_log(event):
+    """True bila event log ini termasuk baris detail internal.
+
+    Ditahan dari SSE di mode default; selalu tampil di mode debug.
+    """
+    if event.get("type") != "log" or event.get("level") == "error":
+        return False
+    if event.get("detail"):
+        return True
+    msg = str(event.get("msg") or "").lower()
+    return any(p in msg for p in _DETAIL_LOG_PATTERNS)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -104,6 +129,9 @@ def api_detect():
 def stream():
     target_url = request.args.get("url", "").strip()
     override = request.args.get("service", "").strip().lower()
+    # Mode debug menampilkan semua baris log detail internal:
+    # ?debug=1 di URL stream, atau env BPHUB_DEBUG=1 di server.
+    debug = request.args.get("debug", "") == "1" or os.environ.get("BPHUB_DEBUG", "") == "1"
 
     def generate():
         if not target_url:
@@ -139,6 +167,8 @@ def stream():
             for event in agen:
                 event = dict(event)
                 event.setdefault("service", name)
+                if not debug and _is_detail_log(event):
+                    continue
                 yield sse(event)
                 if event.get("type") in ("result", "error"):
                     selesai = True
